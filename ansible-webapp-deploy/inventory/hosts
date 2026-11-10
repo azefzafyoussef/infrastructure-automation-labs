@@ -1,0 +1,2 @@
+# LXD container provisioned by provision-container.yml
+mycontainer ansible_connection=lxd

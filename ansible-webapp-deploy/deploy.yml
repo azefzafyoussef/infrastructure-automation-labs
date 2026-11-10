@@ -1,0 +1,126 @@
+---
+# Idempotent deployment of a PHP web application behind Nginx with a MySQL backend.
+# Stack: Nginx (reverse proxy) + PHP 8.3-FPM + MySQL + Composer app, migrations run.
+#
+# Secrets: override db_pass at runtime or with Ansible Vault, never commit a real one:
+#   ansible-playbook deploy.yml -e "db_pass=$(openssl rand -base64 18)"
+- name: Deploy PHP web application
+  hosts: mycontainer
+  become: true
+  connection: lxd
+  vars:
+    app_name: webapp
+    db_name: appdb
+    db_user: appuser
+    db_pass: "changeme"          # override via --extra-vars / Vault
+
+  handlers:
+    - name: restart nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+
+  tasks:
+    # --- Nginx ---
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Enable UFW with default allow
+      community.general.ufw:
+        state: enabled
+        policy: allow
+
+    - name: Allow HTTP through the firewall
+      community.general.ufw:
+        rule: allow
+        name: Nginx HTTP
+
+    - name: Deploy the Nginx server block
+      ansible.builtin.template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/sites-enabled/default
+      notify: restart nginx
+
+    # --- MySQL ---
+    - name: Install MySQL server and Python connector
+      ansible.builtin.apt:
+        name:
+          - mysql-server
+          - python3-mysqldb
+        state: present
+        update_cache: yes
+
+    - name: Create the application database
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+
+    - name: Create the application database user
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_pass }}"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+
+    # --- PHP 8.3 ---
+    - name: Add the ondrej/php PPA
+      ansible.builtin.apt_repository:
+        repo: ppa:ondrej/php
+        state: present
+        update_cache: yes
+
+    - name: Install PHP 8.3-FPM and extensions
+      ansible.builtin.apt:
+        name:
+          - php8.3-fpm
+          - php8.3-mysql
+          - php8.3-pdo
+          - php8.3-pdo-mysql
+        state: present
+
+    - name: Ensure PHP-FPM is started and enabled
+      ansible.builtin.systemd:
+        name: php8.3-fpm
+        state: started
+        enabled: yes
+
+    - name: Install Composer
+      ansible.builtin.script:
+        cmd: files/install-composer.sh
+
+    # --- Application ---
+    - name: Deploy the application archive
+      ansible.builtin.unarchive:
+        src: files/{{ app_name }}.tgz
+        dest: /var/www
+
+    - name: Configure the application environment (.env)
+      ansible.builtin.lineinfile:
+        path: "/var/www/{{ app_name }}/.env"
+        regexp: '^{{ item.key }}='
+        line: '{{ item.key }}={{ item.value }}'
+        state: present
+      loop:
+        - { key: 'DB_DATABASE', value: "{{ db_name }}" }
+        - { key: 'DB_USERNAME', value: "{{ db_user }}" }
+        - { key: 'DB_PASSWORD', value: "{{ db_pass }}" }
+
+    - name: Fix ownership and permissions on writable dirs
+      ansible.builtin.file:
+        path: "/var/www/{{ app_name }}/{{ item }}"
+        owner: www-data
+        group: www-data
+        mode: '0755'
+        recurse: yes
+        state: directory
+      loop:
+        - storage
+        - bootstrap/cache
+
+    - name: Run database migrations
+      ansible.builtin.command: php artisan migrate --force
+      args:
+        chdir: "/var/www/{{ app_name }}"

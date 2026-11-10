@@ -1,0 +1,18 @@
+---
+# Spin up the target LXD container before configuring it.
+- hosts: localhost
+  connection: local
+  tasks:
+    - name: Create and start the container
+      community.general.lxd_container:
+        name: mycontainer
+        state: started
+        source:
+          type: image
+          mode: pull
+          server: https://cloud-images.ubuntu.com/releases/
+          protocol: simplestreams
+          alias: "22.04"
+        profiles: ["default"]
+        wait_for_ipv4_addresses: true
+        timeout: 600
